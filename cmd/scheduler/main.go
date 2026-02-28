@@ -1,7 +1,7 @@
 // Package main is the entry point for the distributed task scheduler service.
-// It wires up the in-memory queue, task and worker repositories, and waits for
-// shutdown. In production, replace the in-memory stores with Redis / Postgres
-// backed implementations via environment variables.
+// It wires up the in-memory queue, task and worker repositories, the cron
+// trigger, and waits for shutdown. In production, replace the in-memory stores
+// with Redis / Postgres backed implementations via environment variables.
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sauravritesh63/GoLang-Project-/domain"
+	"github.com/sauravritesh63/GoLang-Project-/internal/repository/mock"
 	"github.com/sauravritesh63/GoLang-Project-/observability/metrics"
 	"github.com/sauravritesh63/GoLang-Project-/scheduler"
 )
@@ -45,14 +46,26 @@ func main() {
 	taskRepo := newMemTaskRepo()
 	workerRepo := newMemWorkerRepo()
 
-	// In production, the scheduler would be invoked via an RPC/HTTP endpoint
-	// or a cron-triggered goroutine. Here we just wire it up to confirm
-	// dependencies resolve correctly at startup.
+	// In-memory workflow and workflow-run repositories (replace with Postgres in
+	// production). The CronTrigger reads active workflows at startup and
+	// schedules WorkflowRun creation according to each workflow's ScheduleCron
+	// field.
+	wfRepo := mock.NewWorkflowRepo()
+	wfRunRepo := mock.NewWorkflowRunRepo()
+
+	// Scheduler — validates and enqueues tasks.
 	sched := scheduler.New(taskRepo, workerRepo, queue)
 	log.Printf("Scheduler initialised (queue depth: %T)", sched)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// CronTrigger — creates WorkflowRuns on schedule.
+	ct := scheduler.NewCronTrigger(wfRepo, wfRunRepo)
+	if err := ct.Start(ctx); err != nil {
+		log.Printf("CronTrigger: failed to start: %v", err)
+	}
+	defer ct.Stop()
 
 	log.Println("Scheduler service started; waiting for shutdown signal")
 	<-ctx.Done()
