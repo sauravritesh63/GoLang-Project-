@@ -1055,3 +1055,89 @@ readinessProbe:
   - Kubernetes manifests (`k8s/`) for production: Namespace, ConfigMap/Secret, API Deployment (2 replicas, liveness/readiness probes), Scheduler Deployment (1 replica), Worker Deployment (3 replicas, pod name as WORKER_ID)
   - Service entry points added: `cmd/api/main.go`, `cmd/scheduler/main.go`, `cmd/worker/main.go`
   - README updated with deployment, scaling, and CI/CD instructions (see sections below)
+
+---
+
+## Production Checklist
+
+Use this checklist before every production launch or major deployment.
+
+### Infrastructure
+
+- [ ] PostgreSQL deployed with replication and automatic failover (e.g. RDS Multi-AZ, Cloud SQL HA)
+- [ ] Redis deployed with persistence enabled (AOF or RDB) and a replica for failover
+- [ ] TLS termination configured at the load-balancer or ingress level (HTTPS everywhere)
+- [ ] Database connection pool sized appropriately (`DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`)
+- [ ] Database credentials stored in a secrets manager (AWS Secrets Manager, HashiCorp Vault, or Kubernetes External Secrets), **not** hardcoded in ConfigMap
+
+### Application
+
+- [ ] All three services (`api`, `scheduler`, `worker`) start without errors (`go build ./...` passes)
+- [ ] All unit tests pass with the race detector (`go test -race ./...`)
+- [ ] `GET /healthz` returns HTTP 200 for the API service
+- [ ] `GET /metrics` returns valid Prometheus text exposition
+- [ ] `GIN_MODE=release` is set for the API container in production
+- [ ] `LOG_LEVEL` is set to `info` or `warn` (avoid `debug` in production)
+- [ ] Worker `WORKER_ID` values are unique per replica (use Kubernetes `metadata.name` downward API — already configured in `k8s/worker-deployment.yaml`)
+- [ ] Graceful shutdown is verified: SIGTERM drains in-flight tasks before exit (`terminationGracePeriodSeconds` ≥ longest expected task duration)
+
+### Kubernetes
+
+- [ ] Manifests applied in order: `namespace.yaml` → `configmap.yaml` → deployments
+- [ ] `DATABASE_URL` Secret value replaced with real credentials before `kubectl apply`
+- [ ] API liveness and readiness probes validated (both probe `/healthz`)
+- [ ] HPA (Horizontal Pod Autoscaler) configured for the Worker deployment if traffic is variable
+- [ ] Resource `requests` and `limits` tuned based on observed P99 CPU/memory from load tests
+- [ ] Pod Disruption Budgets (PDB) set to ensure at least one API replica is always available during rolling updates
+- [ ] Network Policies applied to restrict inter-service traffic to required paths only
+
+### Observability
+
+- [ ] Prometheus scrapes `api:8080/metrics` (add `scheduler` and `worker` metric endpoints if needed)
+- [ ] Grafana dashboards created for: workflow run rate, task success/failure ratio, task execution duration P50/P99, worker heartbeat lag
+- [ ] Alerting rules configured for: high task failure rate, worker heartbeat silence > 60 s, API error rate spike
+- [ ] Structured JSON logs are being collected by the log aggregator (Loki, CloudWatch, Datadog, etc.)
+- [ ] Log retention policy set (e.g. 30 days hot, 1 year cold)
+
+### Security
+
+- [ ] Container images built from `gcr.io/distroless/static-debian12:nonroot` (no shell, runs as non-root) — already configured
+- [ ] Image vulnerability scan passes (e.g. Trivy, Snyk) with no critical/high findings
+- [ ] API does not expose sensitive data in error responses (`GIN_MODE=release` suppresses stack traces)
+- [ ] Database migrations tested on a staging database before running on production
+- [ ] `000001_init.down.sql` is reviewed and available for emergency rollback
+
+### CI/CD
+
+- [ ] CI pipeline (`ci.yaml`) green on the release commit: lint → test → build → Docker image smoke test
+- [ ] Release pipeline (`release.yaml`) triggered via a semver tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`)
+- [ ] Multi-arch Docker images (`linux/amd64`, `linux/arm64`) published to GHCR
+- [ ] GitHub Release created with auto-generated release notes and binary attachments
+
+---
+
+## Final Recommendations
+
+### Short-term (before v1.0 launch)
+
+1. **Replace in-memory queue with Redis Streams or a persistent queue** — The current `scheduler/queue.go` is an in-memory FIFO. If the scheduler pod restarts, queued tasks are lost. Integrate Redis Streams (or a PostgreSQL-backed queue like `pgqueuer`) so tasks survive restarts.
+
+2. **Add scheduler leader-election** — The `k8s/scheduler-deployment.yaml` runs a single replica. Until leader-election is implemented (e.g. via a Kubernetes Lease object), scaling the scheduler to >1 replica will cause duplicate task submissions. Keep `replicas: 1` until this is addressed.
+
+3. **Instrument the scheduler and worker with Prometheus metrics** — `observability/metrics/metrics.go` defines the `Collector`, but the scheduler and worker services do not yet call `metrics.New()` and record observations. Wire metrics into `cmd/scheduler/main.go` and `cmd/worker/main.go`.
+
+4. **Add integration / smoke tests** — The test suite covers domain logic and repository mocks well (80+ unit tests), but there are no end-to-end tests that spin up the full stack. Add at least one smoke test using `docker compose up` that verifies: workflow created → task queued → worker picks it up → status transitions to `success`.
+
+5. **Cron-based workflow triggering** — The scheduler compiles and the domain supports `ScheduleCron`, but the current `cmd/scheduler/main.go` does not parse cron expressions and trigger `WorkflowRun` creation on schedule. Add a cron library (e.g. `github.com/robfig/cron/v3`) and implement the trigger loop.
+
+### Medium-term (post-launch hardening)
+
+6. **DAG dependency enforcement** — `TaskDependency` is persisted in the DB but the worker does not currently check that upstream tasks are complete before executing a downstream task. Implement a DAG resolver in the scheduler or worker service.
+
+7. **Distributed tracing** — Add OpenTelemetry instrumentation (`go.opentelemetry.io/otel`) with a Jaeger or Tempo backend for end-to-end trace visibility across API → Scheduler → Worker.
+
+8. **Rate-limiting and authentication on the REST API** — The API is currently open. Add JWT or API-key middleware (e.g. `github.com/gin-contrib/jwt`) and rate-limiting (e.g. `golang.org/x/time/rate`) before exposing to the internet.
+
+9. **WebSocket authentication** — The WebSocket hub at `/ws/tasks` is unauthenticated. Add a token-based handshake before upgrading connections.
+
+10. **Horizontal worker auto-scaling** — Configure a Kubernetes HPA on the Worker deployment that scales on a custom metric (e.g. queue depth exported via a Prometheus adapter), so the worker pool grows automatically under load.
