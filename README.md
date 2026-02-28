@@ -225,6 +225,23 @@ migrate -path db/migrations -database "postgres://user:password@localhost:5432/m
 migrate -path db/migrations -database "postgres://user:password@localhost:5432/mini_airflow?sslmode=disable" down 1
 ```
 
+### Migration verification status
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `db/migrations/` directory | ✅ Present | |
+| `000001_init.up.sql` | ✅ Present | Creates all six tables, indexes, and `uuid-ossp` extension |
+| `000001_init.down.sql` | ✅ Present | Drops all tables in reverse dependency order |
+| `workflows` table | ✅ Matches domain | Columns: `id`, `name`, `description`, `schedule_cron`, `is_active`, `created_at` |
+| `tasks` table | ✅ Matches domain | Columns: `id`, `workflow_id`, `name`, `command`, `retry_count`, `retry_delay_seconds`, `timeout_seconds`, `created_at` |
+| `task_dependencies` table | ✅ Matches domain | Columns: `id`, `task_id`, `depends_on_task_id`; unique on `(task_id, depends_on_task_id)` |
+| `workflow_runs` table | ✅ Matches domain | Columns: `id`, `workflow_id`, `status`, `started_at`, `finished_at` |
+| `task_runs` table | ✅ Matches domain | Columns: `id`, `workflow_run_id`, `task_id`, `status`, `attempt`, `started_at`, `finished_at`, `logs` |
+| `workers` table | ✅ Matches domain | Columns: `id`, `hostname`, `last_heartbeat`, `status` |
+| Indexes | ✅ All present | See [Database Schema](#database-schema) for full index list |
+
+Nothing is missing — the migration files and schema are complete and consistent with the domain specification.
+
 ---
 
 ## Database Schema
