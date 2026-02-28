@@ -251,7 +251,8 @@ func TestWorker_Run_FailedTaskWithRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	w := worker.New("w1", q, tr, wr, h)
+	noBackoff := worker.WithBackoff(func(int) time.Duration { return 0 })
+	w := worker.New("w1", q, tr, wr, h, noBackoff)
 	errCh := make(chan error, 1)
 	go func() { errCh <- w.Run(ctx) }()
 
@@ -381,5 +382,74 @@ func TestWorker_Run_HeartbeatUpdated(t *testing.T) {
 	}
 	if !after.LastHeartAt.After(initialHeart) {
 		t.Errorf("expected LastHeartAt to be updated; before=%v after=%v", initialHeart, after.LastHeartAt)
+	}
+}
+
+func TestMockShellHandler(t *testing.T) {
+	ctx := context.Background()
+
+	// Task with payload.
+	task := validTask("t1")
+	task.Payload = []byte("echo hello")
+	if err := worker.MockShellHandler(ctx, task); err != nil {
+		t.Errorf("MockShellHandler with payload: unexpected error: %v", err)
+	}
+
+	// Task without payload.
+	empty := validTask("t2")
+	if err := worker.MockShellHandler(ctx, empty); err != nil {
+		t.Errorf("MockShellHandler without payload: unexpected error: %v", err)
+	}
+}
+
+func TestWorker_ExponentialBackoff(t *testing.T) {
+	// Verify that the backoff delay is applied between retries.
+	q := scheduler.NewMemQueue()
+	tr := newMemTaskRepo()
+	wr := newMemWorkerRepo()
+
+	task := validTask("t1")
+	task.MaxRetries = 1
+	_ = tr.Save(context.Background(), task)
+	_ = q.Enqueue(context.Background(), task)
+
+	// Record the timestamps of each attempt.
+	var (
+		mu         sync.Mutex
+		timestamps []time.Time
+	)
+	h := func(_ context.Context, _ *domain.Task) error {
+		mu.Lock()
+		timestamps = append(timestamps, time.Now())
+		mu.Unlock()
+		return errors.New("always fail")
+	}
+
+	const backoffDelay = 50 * time.Millisecond
+	fixedBackoff := worker.WithBackoff(func(int) time.Duration { return backoffDelay })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	w := worker.New("w1", q, tr, wr, h, fixedBackoff)
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx) }()
+
+	// Wait for terminal state (2 attempts with MaxRetries=1).
+	poll(t, 2*time.Second, func() bool {
+		stored, _ := tr.FindByID(context.Background(), "t1")
+		return stored != nil && stored.IsTerminal()
+	})
+	cancel()
+	<-errCh
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(timestamps) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(timestamps))
+	}
+	gap := timestamps[1].Sub(timestamps[0])
+	if gap < backoffDelay {
+		t.Errorf("expected backoff delay ≥ %v between retries, got %v", backoffDelay, gap)
 	}
 }
