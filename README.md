@@ -661,7 +661,19 @@ func main() {
   - `internal/api/websocket/` — Gorilla WebSocket hub for real-time event broadcasting
   - 10 unit tests in `handler/handler_test.go` — all passing
   - README updated with endpoint reference, WebSocket usage, and architecture notes
-- [ ] **Phase 5** — Scheduler service (cron-based workflow triggering)
-- [ ] **Phase 6** — Worker service (task execution, heartbeat, retry logic)
+- [ ] **Phase 5** — Scheduler service (`scheduler/`) — **NOT STARTED** ⚠️
+  - **Status:** No `scheduler/` package exists; Phase 5 has not been implemented.
+  - **Verified against latest PR:** PR #7 (merged 2026-02-28) covers Phase 4 only. No scheduler code was introduced.
+  - **TODOs before Phase 6 (Worker Service) can begin:**
+    - [ ] Create `scheduler/` package with a `Scheduler` struct implementing the `domain.Scheduler` interface
+    - [ ] Implement cron-based trigger loop (e.g. using `robfig/cron` or `time.Ticker`) to poll for due workflows
+    - [ ] Enqueue ready `Task` records onto the `domain.Queue` when their `ScheduledAt` time is reached
+    - [ ] Persist `WorkflowRun` and initial `TaskRun` records via `repository.WorkflowRunRepository` / `repository.TaskRunRepository`
+    - [ ] Evaluate workflow DAG dependencies (respect `TaskDependency` ordering before enqueuing downstream tasks)
+    - [ ] Integrate scheduler with WebSocket hub (`api/websocket`) to broadcast `workflow_status` events on trigger
+    - [ ] Write unit tests for scheduler logic using mock repositories and an in-memory queue
+    - [ ] Update `internal/api/service/` to expose a `TriggerWorkflow` path that delegates to the scheduler
+    - [ ] Update architecture diagram in README to show `scheduler/` package in the data flow
+- [ ] **Phase 6** — Worker service (task execution, heartbeat, retry logic) — blocked by Phase 5
 - [ ] **Phase 7** — Persistence layer (PostgreSQL — wire up repositories to real DB)
 - [ ] **Phase 8** — Observability (metrics, structured logging, tracing)
