@@ -39,12 +39,13 @@ Clean-architecture package layout:
                     │ (interfaces)
         ┌───────────┼───────────┐
         ▼           ▼           ▼
-   scheduler/   worker/    storage/           ← Phase 2 (next)
-  (use-cases) (executor)  (in-memory / Redis)
+   internal/repository/          ← Phase 3 ✅ (repository interfaces + GORM + mocks)
+   ├── interfaces.go             (WorkflowRepository, TaskRepository, …)
+   ├── postgres/                 (GORM-backed implementations)
+   └── mock/                     (in-memory implementations for testing)
         │
         ▼
-    api/http                                  ← Phase 3
-    (REST endpoints)
+   scheduler/ worker/ api/http  ← Phase 4+
 ```
 
 ---
@@ -199,6 +200,46 @@ used by the service layer.
 | `TestWorker_IsAlive`                | Liveness check against heartbeat timeout                              |
 | `TestSentinelErrors_NotNil`         | All sentinel errors are non-nil                                       |
 
+### `internal/repository/mock/mock_test.go` (30 tests)
+
+| Test name                                    | What it covers                                              |
+|----------------------------------------------|-------------------------------------------------------------|
+| `TestWorkflowRepo_CreateAndGetByID`          | Create + round-trip fetch                                   |
+| `TestWorkflowRepo_GetByID_NotFound`          | ErrNotFound on unknown ID                                   |
+| `TestWorkflowRepo_Update`                    | Field mutation persists                                     |
+| `TestWorkflowRepo_Update_NotFound`           | ErrNotFound when updating missing record                    |
+| `TestWorkflowRepo_Delete`                    | Record is removed                                           |
+| `TestWorkflowRepo_Delete_NotFound`           | ErrNotFound on second delete                                |
+| `TestWorkflowRepo_List`                      | All records returned                                        |
+| `TestWorkflowRepo_ListActive`                | Only active workflows returned                              |
+| `TestTaskRepo_CreateAndGetByID`              | Create + round-trip fetch                                   |
+| `TestTaskRepo_GetByID_NotFound`              | ErrNotFound on unknown ID                                   |
+| `TestTaskRepo_ListByWorkflowID`              | Filters by workflow_id correctly                            |
+| `TestTaskRepo_Delete`                        | Record removed; second delete → ErrNotFound                 |
+| `TestWorkflowRunRepo_CreateAndGetByID`       | Create + round-trip fetch                                   |
+| `TestWorkflowRunRepo_UpdateStatus`           | Status + FinishedAt updated atomically                      |
+| `TestWorkflowRunRepo_UpdateStatus_NotFound`  | ErrNotFound on unknown ID                                   |
+| `TestWorkflowRunRepo_ListByWorkflowID`       | Filters by workflow_id correctly                            |
+| `TestWorkflowRunRepo_ListByStatus`           | Filters by status correctly                                 |
+| `TestTaskRunRepo_CreateAndGetByID`           | Create + round-trip fetch                                   |
+| `TestTaskRunRepo_UpdateStatus`               | Status updated                                              |
+| `TestTaskRunRepo_ListByWorkflowRunID`        | Filters by workflow_run_id correctly                        |
+| `TestTaskRunRepo_ListByTaskID`               | Filters by task_id correctly                                |
+| `TestTaskRunRepo_ListByStatus`               | Filters by status correctly                                 |
+| `TestWorkerRepo_CreateAndGetByID`            | Create + round-trip fetch                                   |
+| `TestWorkerRepo_GetByID_NotFound`            | ErrNotFound on unknown ID                                   |
+| `TestWorkerRepo_Update`                      | Field mutation persists                                     |
+| `TestWorkerRepo_Delete`                      | Record removed; second delete → ErrNotFound                 |
+| `TestWorkerRepo_ListActive`                  | Only active workers returned                                |
+| `TestWorkerRepo_UpdateHeartbeat`             | LastHeartbeat updated                                       |
+| `TestWorkerRepo_UpdateHeartbeat_NotFound`    | ErrNotFound on unknown ID                                   |
+| _(compile-time interface checks)_            | All mock types satisfy repository interfaces                |
+
+### `internal/repository/postgres/postgres_test.go`
+
+Compile-time `var _ repository.XxxRepository = (*postgres.XxxRepo)(nil)` checks
+verify that each GORM implementation satisfies the corresponding interface.
+
 ---
 
 ## Database Migrations
@@ -326,6 +367,135 @@ Indexes: `status`, `last_heartbeat`
 
 ---
 
+## Repository Layer (`internal/repository`)
+
+Phase 3 adds a repository layer that decouples the service/use-case code from the
+database technology. The **repository pattern** used here consists of three parts:
+
+| Package | Purpose |
+|---------|---------|
+| `internal/repository` | Interface definitions only — the contract every concrete implementation must honour |
+| `internal/repository/postgres` | GORM-backed implementations for PostgreSQL |
+| `internal/repository/mock` | Thread-safe in-memory implementations for unit testing |
+
+### Repository Interfaces
+
+All interfaces live in `internal/repository/interfaces.go`. Every method accepts a
+`context.Context` as its first argument so callers can propagate deadlines and
+cancellation signals to the database.
+
+#### `WorkflowRepository`
+
+```go
+type WorkflowRepository interface {
+    Create(ctx context.Context, wf *domain.Workflow) error
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.Workflow, error)
+    Update(ctx context.Context, wf *domain.Workflow) error
+    Delete(ctx context.Context, id uuid.UUID) error
+    List(ctx context.Context) ([]*domain.Workflow, error)
+    ListActive(ctx context.Context) ([]*domain.Workflow, error)
+}
+```
+
+#### `TaskRepository`
+
+```go
+type TaskRepository interface {
+    Create(ctx context.Context, t *domain.Task) error
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.Task, error)
+    Update(ctx context.Context, t *domain.Task) error
+    Delete(ctx context.Context, id uuid.UUID) error
+    ListByWorkflowID(ctx context.Context, workflowID uuid.UUID) ([]*domain.Task, error)
+}
+```
+
+#### `WorkflowRunRepository`
+
+```go
+type WorkflowRunRepository interface {
+    Create(ctx context.Context, wr *domain.WorkflowRun) error
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.WorkflowRun, error)
+    UpdateStatus(ctx context.Context, id uuid.UUID, status domain.Status, finishedAt *time.Time) error
+    ListByWorkflowID(ctx context.Context, workflowID uuid.UUID) ([]*domain.WorkflowRun, error)
+    ListByStatus(ctx context.Context, status domain.Status) ([]*domain.WorkflowRun, error)
+}
+```
+
+#### `TaskRunRepository`
+
+```go
+type TaskRunRepository interface {
+    Create(ctx context.Context, tr *domain.TaskRun) error
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.TaskRun, error)
+    UpdateStatus(ctx context.Context, id uuid.UUID, status domain.Status, finishedAt *time.Time) error
+    ListByWorkflowRunID(ctx context.Context, workflowRunID uuid.UUID) ([]*domain.TaskRun, error)
+    ListByTaskID(ctx context.Context, taskID uuid.UUID) ([]*domain.TaskRun, error)
+    ListByStatus(ctx context.Context, status domain.Status) ([]*domain.TaskRun, error)
+}
+```
+
+#### `WorkerRepository`
+
+```go
+type WorkerRepository interface {
+    Create(ctx context.Context, w *domain.Worker) error
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.Worker, error)
+    Update(ctx context.Context, w *domain.Worker) error
+    Delete(ctx context.Context, id uuid.UUID) error
+    ListActive(ctx context.Context) ([]*domain.Worker, error)
+    UpdateHeartbeat(ctx context.Context, id uuid.UUID, at time.Time) error
+}
+```
+
+### Sentinel error
+
+`repository.ErrNotFound` is returned by any method when the requested record does
+not exist. Callers can test for it with `errors.Is`.
+
+### GORM (PostgreSQL) implementation
+
+`internal/repository/postgres` provides one concrete struct per interface (e.g.
+`WorkflowRepo`, `TaskRepo`). Each struct accepts a `*gorm.DB` via its constructor:
+
+```go
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+
+workflowRepo := postgresrepo.NewWorkflowRepo(db)
+taskRepo     := postgresrepo.NewTaskRepo(db)
+// …
+```
+
+Internally each struct maintains private GORM model types (with `gorm:` struct
+tags and a `TableName()` method) and converts them to/from the domain types.
+This keeps the domain package free of any ORM or database concern.
+
+### Mock (in-memory) implementation
+
+`internal/repository/mock` provides thread-safe in-memory implementations backed
+by `sync.RWMutex`-protected maps. They are designed for unit tests and satisfy
+the same interfaces:
+
+```go
+workflowRepo := mock.NewWorkflowRepo()
+taskRepo     := mock.NewTaskRepo()
+// …
+```
+
+### Design principles
+
+- **Dependency injection** — every concrete repo receives its dependencies
+  (`*gorm.DB`) via a `NewXxx(db)` constructor; there are no package-level global
+  variables.
+- **Context-aware** — every method signature starts with `context.Context`,
+  which is forwarded to `db.WithContext(ctx)` so timeouts and cancellations are
+  always respected.
+- **Interface segregation** — one small interface per aggregate root; callers
+  only depend on what they actually use.
+- **Testability** — business logic can be tested without a live database by
+  injecting a `mock.*Repo` instead of a `postgres.*Repo`.
+
+---
+
 ## Project Roadmap
 
 - [x] **Phase 1** — Domain models (`internal/domain`) + Scheduler interfaces (`domain/`)
@@ -337,10 +507,11 @@ Indexes: `status`, `last_heartbeat`
   - `000001_init.up.sql` — creates all six tables with UUID PKs, FK constraints, and indexes
   - `000001_init.down.sql` — drops all tables in reverse dependency order
   - README updated with migration instructions and full DB schema reference
-- [ ] **Phase 3** — Repository interfaces & in-memory implementations
-  - Thread-safe `TaskRepository` and `WorkerRepository` backed by `sync.RWMutex` maps
-  - Priority `Queue` using `container/heap` + `sync.Cond`
-  - `SchedulerService` use-case wiring them together
+- [x] **Phase 3** — Repository interfaces & GORM implementations
+  - `internal/repository/interfaces.go` — five typed interfaces (WorkflowRepository, TaskRepository, WorkflowRunRepository, TaskRunRepository, WorkerRepository)
+  - `internal/repository/postgres/` — GORM-backed implementations (dependency injection, context-aware, no global state)
+  - `internal/repository/mock/` — thread-safe in-memory implementations for unit testing
+  - 29 unit tests in `mock/mock_test.go` — all passing; compile-time interface checks in `postgres/postgres_test.go`
 - [ ] **Phase 4** — Scheduler service (cron-based workflow triggering)
 - [ ] **Phase 5** — Worker service (task execution, heartbeat, retry logic)
 - [ ] **Phase 6** — REST API (workflow/run management endpoints)
