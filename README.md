@@ -45,7 +45,12 @@ Clean-architecture package layout:
    └── mock/                     (in-memory implementations for testing)
         │
         ▼
-   scheduler/ worker/ api/http  ← Phase 4+
+   internal/api/                ← Phase 4 ✅ (REST API + WebSocket hub)
+   ├── router.go                (Gin engine wiring — dependency injection)
+   ├── service/service.go       (business-logic layer — context-aware)
+   ├── handler/handler.go       (HTTP handlers)
+   └── websocket/hub.go         (real-time event broadcasting)
+   scheduler/ worker/           ← Phase 5+
 ```
 
 ---
@@ -496,6 +501,143 @@ taskRepo     := mock.NewTaskRepo()
 
 ---
 
+## REST API (`internal/api`)
+
+Phase 4 adds a Gin-based HTTP API with the following endpoints.
+
+### Service Architecture
+
+```
+HTTP Client
+    │
+    ▼
+internal/api/router.go      ← Gin engine; dependency injection entry point
+    │
+    ▼
+internal/api/handler/       ← HTTP layer: parse request, call service, write JSON
+    │
+    ▼
+internal/api/service/       ← Business logic: orchestrate repositories
+    │
+    ▼
+internal/repository/        ← Repository interfaces (Phase 3)
+```
+
+The WebSocket hub (`internal/api/websocket/Hub`) is injected into the handler
+layer and receives `Broadcast` calls whenever a workflow is triggered.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/workflows` | Create a new workflow |
+| `GET`  | `/workflows` | List workflows (paginated) |
+| `POST` | `/workflows/{id}/trigger` | Trigger a new run of a workflow |
+| `GET`  | `/workflow-runs` | List workflow runs (optional `?status=` filter) |
+| `GET`  | `/task-runs` | List task runs (optional `?status=` filter) |
+| `GET`  | `/workers` | List active workers |
+| `GET`  | `/ws/updates` | WebSocket — real-time event stream |
+
+#### Pagination
+
+`GET /workflows` supports `?offset=<int>&limit=<int>` query parameters.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `offset`  | `0`     | Number of records to skip |
+| `limit`   | `20`    | Maximum number of records to return |
+
+#### Status filter
+
+`GET /workflow-runs` and `GET /task-runs` accept an optional `?status=` query
+parameter. Valid values: `pending`, `running`, `success`, `failed`.
+
+### Example curl Usage
+
+```bash
+# Create a workflow
+curl -s -X POST http://localhost:8080/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"daily-etl","description":"Daily ETL pipeline","schedule_cron":"0 2 * * *","is_active":true}' | jq
+
+# List workflows (first page)
+curl -s 'http://localhost:8080/workflows?offset=0&limit=10' | jq
+
+# Trigger a workflow run (replace <id> with the UUID from the create response)
+curl -s -X POST http://localhost:8080/workflows/<id>/trigger | jq
+
+# List workflow runs filtered by status
+curl -s 'http://localhost:8080/workflow-runs?status=pending' | jq
+
+# List task runs
+curl -s 'http://localhost:8080/task-runs' | jq
+
+# List active workers
+curl -s 'http://localhost:8080/workers' | jq
+```
+
+### WebSocket Usage
+
+Connect to `ws://localhost:8080/ws/updates` to receive real-time JSON events.
+
+**Event envelope:**
+
+```json
+{
+  "type": "workflow_status",
+  "payload": { ... }
+}
+```
+
+| `type` value | Emitted when |
+|---|---|
+| `workflow_status` | A workflow run is created / its status changes |
+| `task_status` | A task run changes state |
+| `worker_heartbeat` | A worker sends a heartbeat |
+
+**Example — connect with `websocat`:**
+
+```bash
+websocat ws://localhost:8080/ws/updates
+```
+
+**Example — connect with JavaScript (browser):**
+
+```js
+const ws = new WebSocket('ws://localhost:8080/ws/updates');
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  console.log(msg.type, msg.payload);
+};
+```
+
+### Starting the API server
+
+The router is created via `api.NewRouter` with injected repository
+implementations. Wire it up in your `main.go`:
+
+```go
+package main
+
+import (
+    "github.com/sauravritesh63/GoLang-Project-/internal/api"
+    "github.com/sauravritesh63/GoLang-Project-/internal/repository/mock"
+)
+
+func main() {
+    // Replace mock repos with postgres implementations when a DB is available.
+    r := api.NewRouter(
+        mock.NewWorkflowRepo(),
+        mock.NewWorkflowRunRepo(),
+        mock.NewTaskRunRepo(),
+        mock.NewWorkerRepo(),
+    )
+    r.Run(":8080")
+}
+```
+
+---
+
 ## Project Roadmap
 
 - [x] **Phase 1** — Domain models (`internal/domain`) + Scheduler interfaces (`domain/`)
@@ -512,8 +654,14 @@ taskRepo     := mock.NewTaskRepo()
   - `internal/repository/postgres/` — GORM-backed implementations (dependency injection, context-aware, no global state)
   - `internal/repository/mock/` — thread-safe in-memory implementations for unit testing
   - 29 unit tests in `mock/mock_test.go` — all passing; compile-time interface checks in `postgres/postgres_test.go`
-- [ ] **Phase 4** — Scheduler service (cron-based workflow triggering)
-- [ ] **Phase 5** — Worker service (task execution, heartbeat, retry logic)
-- [ ] **Phase 6** — REST API (workflow/run management endpoints)
+- [x] **Phase 4** — REST API + WebSocket hub (`internal/api/`)
+  - `internal/api/router.go` — Gin engine wired with dependency injection
+  - `internal/api/service/` — business-logic layer (context-aware, no direct DB access)
+  - `internal/api/handler/` — HTTP handlers for all six REST endpoints
+  - `internal/api/websocket/` — Gorilla WebSocket hub for real-time event broadcasting
+  - 10 unit tests in `handler/handler_test.go` — all passing
+  - README updated with endpoint reference, WebSocket usage, and architecture notes
+- [ ] **Phase 5** — Scheduler service (cron-based workflow triggering)
+- [ ] **Phase 6** — Worker service (task execution, heartbeat, retry logic)
 - [ ] **Phase 7** — Persistence layer (PostgreSQL — wire up repositories to real DB)
 - [ ] **Phase 8** — Observability (metrics, structured logging, tracing)
