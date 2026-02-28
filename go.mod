@@ -1,3 +1,5 @@
-module github.com/sauravritesh63/distributed-task-scheduler
+module github.com/sauravritesh63/GoLang-Project-
 
-go 1.24.13
+go 1.24
+
+require github.com/google/uuid v1.6.0

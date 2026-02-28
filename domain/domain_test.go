@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sauravritesh63/distributed-task-scheduler/domain"
+	"github.com/sauravritesh63/GoLang-Project-/domain"
 )
 
 // ── Task tests ────────────────────────────────────────────────────────────────
