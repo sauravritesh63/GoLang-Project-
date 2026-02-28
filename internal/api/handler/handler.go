@@ -37,6 +37,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/task-runs", h.listTaskRuns)
 	r.GET("/workers", h.listWorkers)
 	r.GET("/ws/updates", h.serveWS)
+	r.GET("/healthz", h.healthz)
 }
 
 // createWorkflow handles POST /workflows.
@@ -126,4 +127,15 @@ func (h *Handler) listWorkers(c *gin.Context) {
 // serveWS upgrades the connection to WebSocket and streams real-time events.
 func (h *Handler) serveWS(c *gin.Context) {
 	h.hub.ServeWS(c.Writer, c.Request)
+}
+
+// healthz handles GET /healthz.
+// It returns a JSON object with the overall service status. Additional
+// component checks (DB, Redis, etc.) can be injected here when concrete
+// infrastructure clients are wired in.
+func (h *Handler) healthz(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"service": "task-scheduler-api",
+	})
 }

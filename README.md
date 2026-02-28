@@ -59,6 +59,11 @@ Clean-architecture package layout:
         ▼
    worker/                      ← Phase 6 ✅ (Worker service — execute, heartbeat, retry)
    └── worker.go                (Worker — dequeue, execute, retry, heartbeat loop)
+        │
+        ▼
+   observability/               ← Phase 7 ✅ (structured logging + Prometheus metrics)
+   ├── logging/logging.go       (zerolog-based structured logger with workflow/task context)
+   └── metrics/metrics.go       (Prometheus counters, histograms, gauges)
 ```
 
 ---
@@ -762,6 +767,114 @@ Workers register themselves in the `WorkerRepository` on startup and send heartb
 
 ---
 
+## Observability (`observability/`)
+
+Phase 7 adds centralized structured logging, Prometheus metrics, and HTTP health/metrics endpoints.
+
+### Structured Logging (`observability/logging`)
+
+The `logging` package wraps [zerolog](https://github.com/rs/zerolog) and provides:
+
+- A package-level `Logger` (JSON to stdout) ready to use with zero configuration.
+- `New(w io.Writer)` — create a logger writing to any `io.Writer`.
+- `WithContext` / `FromContext` — embed a logger in a `context.Context` and retrieve it anywhere in a call chain.
+- `WithWorkflow`, `WithTask`, `WithWorker` — attach contextual fields so every log line carries `workflow_id`, `task_id`, or `worker_id`.
+
+```go
+import "github.com/sauravritesh63/GoLang-Project-/observability/logging"
+
+// Use the default logger (JSON, stdout).
+logging.Logger.Info().Str("event", "server_start").Int("port", 8080).Msg("API server listening")
+
+// Attach a workflow-scoped logger to a context.
+ctx = logging.WithContext(ctx, logging.WithWorkflow(logging.Logger, wf.ID.String(), wf.Name))
+
+// Retrieve it later in any function that receives ctx.
+log := logging.FromContext(ctx)
+log.Info().Str("status", "triggered").Msg("workflow run started")
+```
+
+All log lines are valid JSON and include a `time` field (RFC3339). Pipe output to `jq` or any log-aggregation platform (Loki, Datadog, CloudWatch, etc.).
+
+### Prometheus Metrics (`observability/metrics`)
+
+Call `metrics.New()` once during startup to register all counters and histograms with the default Prometheus registry:
+
+```go
+import "github.com/sauravritesh63/GoLang-Project-/observability/metrics"
+
+col := metrics.New()
+
+// Increment after each workflow run is triggered.
+col.WorkflowsTotal.WithLabelValues("pending").Inc()
+
+// Record task execution duration.
+col.TaskDuration.WithLabelValues("succeeded").Observe(duration.Seconds())
+
+// Count heartbeats per worker.
+col.WorkerHeartbeats.WithLabelValues(workerID).Inc()
+
+// Count retries per worker.
+col.TaskRetries.WithLabelValues(workerID).Inc()
+```
+
+#### Metrics reference
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `scheduler_workflows_total` | Counter | `status` | Total workflow runs triggered |
+| `scheduler_tasks_total` | Counter | `status` | Total task runs processed |
+| `scheduler_task_duration_seconds` | Histogram | `status` | Task execution duration |
+| `scheduler_workflow_failures_total` | Counter | — | Total workflow run failures |
+| `scheduler_workflow_successes_total` | Counter | — | Total workflow run successes |
+| `scheduler_worker_heartbeats_total` | Counter | `worker_id` | Total worker heartbeat ticks |
+| `scheduler_task_retries_total` | Counter | `worker_id` | Total task retry attempts |
+
+### HTTP Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/metrics` | GET | Prometheus scrape endpoint — exposes all registered metrics in text format |
+| `/healthz` | GET | Health check — returns `{"status":"ok","service":"task-scheduler-api"}` |
+
+**Example — check health:**
+```bash
+curl http://localhost:8080/healthz
+# {"service":"task-scheduler-api","status":"ok"}
+```
+
+**Example — scrape metrics:**
+```bash
+curl http://localhost:8080/metrics
+# HELP scheduler_workflows_total Total number of workflow runs triggered.
+# TYPE scheduler_workflows_total counter
+# scheduler_workflows_total{status="pending"} 3
+# ...
+```
+
+### Prometheus Setup (docker-compose snippet)
+
+Add the following to your `docker-compose.yml` to scrape the API service:
+
+```yaml
+prometheus:
+  image: prom/prometheus:latest
+  volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  ports:
+    - "9090:9090"
+```
+
+`prometheus.yml`:
+```yaml
+scrape_configs:
+  - job_name: task-scheduler-api
+    static_configs:
+      - targets: ["api:8080"]
+```
+
+---
+
 
 
 - [x] **Phase 1** — Domain models (`internal/domain`) + Scheduler interfaces (`domain/`)
@@ -795,5 +908,10 @@ Workers register themselves in the `WorkerRepository` on startup and send heartb
   - `worker.DefaultBackoff` — exponential backoff (1 s, 2 s, 4 s … capped at 30 s); overridable via `WithBackoff`
   - `worker.WithBackoff` functional option for injecting a custom or zero-delay backoff (useful in tests)
   - 8 unit tests in `worker/worker_test.go` — all passing (register, success, retry, no-retry, clean shutdown, heartbeat, mock-handler, backoff timing)
-- [ ] **Phase 7** — Persistence layer (PostgreSQL — wire up repositories to real DB)
-- [ ] **Phase 8** — Observability (metrics, structured logging, tracing)
+- [x] **Phase 7** — Observability (structured logging, Prometheus metrics, health checks)
+  - `observability/logging/logging.go` — zerolog-based structured logger with context propagation and per-workflow/task/worker field helpers
+  - `observability/metrics/metrics.go` — Prometheus `Collector` with counters/histograms for workflows, tasks, workers, and retries
+  - `GET /metrics` — Prometheus scrape endpoint (registered on the Gin router via `promhttp.Handler()`)
+  - `GET /healthz` — Health check endpoint returning `{"status":"ok","service":"task-scheduler-api"}`
+  - 1 unit test in `handler/handler_test.go` — `TestHealthz` — all passing
+  - README updated with observability endpoints, metrics reference, and setup instructions

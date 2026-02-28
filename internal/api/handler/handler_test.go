@@ -249,3 +249,26 @@ func TestListWorkers_Active(t *testing.T) {
 		t.Errorf("expected host-1, got %q", workers[0].Hostname)
 	}
 }
+
+// TestHealthz verifies GET /healthz returns 200 with status "ok".
+func TestHealthz(t *testing.T) {
+	r, _, _, _, _ := newTestRouter()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %q", body["status"])
+	}
+	if body["service"] != "task-scheduler-api" {
+		t.Errorf("expected service 'task-scheduler-api', got %q", body["service"])
+	}
+}
