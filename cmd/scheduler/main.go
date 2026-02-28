@@ -7,16 +7,40 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sauravritesh63/GoLang-Project-/domain"
+	"github.com/sauravritesh63/GoLang-Project-/observability/metrics"
 	"github.com/sauravritesh63/GoLang-Project-/scheduler"
 )
 
 func main() {
+	metricsPort := getEnv("METRICS_PORT", "9090")
+
+	// Register Prometheus metrics for this scheduler process. The Collector is
+	// not stored because promauto registers all metrics with the default registry
+	// on construction; the /metrics handler will serve them automatically.
+	_ = metrics.New()
+
+	// Expose /metrics and /healthz on a dedicated port.
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","service":"task-scheduler-scheduler"}`))
+	})
+	go func() {
+		log.Printf("Scheduler metrics server listening on :%s", metricsPort)
+		if err := http.ListenAndServe(":"+metricsPort, mux); err != nil && err != http.ErrServerClosed {
+			log.Printf("metrics server error: %v", err)
+		}
+	}()
+
 	queue := scheduler.NewMemQueue()
 	taskRepo := newMemTaskRepo()
 	workerRepo := newMemWorkerRepo()
@@ -33,6 +57,13 @@ func main() {
 	log.Println("Scheduler service started; waiting for shutdown signal")
 	<-ctx.Done()
 	log.Println("Scheduler service stopped")
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // ── in-memory stores (replace with Redis/Postgres in production) ──────────────

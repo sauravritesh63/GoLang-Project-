@@ -16,13 +16,22 @@ spec:
       labels:
         app: scheduler
         app.kubernetes.io/part-of: task-scheduler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: scheduler
           image: ghcr.io/sauravritesh63/task-scheduler-scheduler:latest
           imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            - name: METRICS_PORT
+              value: "9090"
             - name: LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -33,9 +42,18 @@ spec:
                 secretKeyRef:
                   name: task-scheduler-secrets
                   key: DATABASE_URL
-          # No HTTP endpoint — Kubernetes will restart the pod automatically
-          # if the process exits. Add a health-file probe or gRPC health check
-          # when the scheduler exposes one.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: "100m"
