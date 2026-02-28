@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-scheduler-config
+  namespace: task-scheduler
+  labels:
+    app.kubernetes.io/part-of: task-scheduler
+data:
+  GIN_MODE: "release"
+  LOG_LEVEL: "info"
+  API_PORT: "8080"
+---
+# Secret template — populate values before applying.
+# In production use an external secrets manager (e.g. AWS Secrets Manager,
+# HashiCorp Vault, or the Kubernetes External Secrets Operator).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: task-scheduler-secrets
+  namespace: task-scheduler
+  labels:
+    app.kubernetes.io/part-of: task-scheduler
+type: Opaque
+stringData:
+  DATABASE_URL: "host=postgres user=scheduler password=changeme dbname=scheduler sslmode=require"

@@ -1,0 +1,15 @@
+# Compiled binaries
+/api
+/scheduler
+/worker
+dist/
+
+# Go build cache
+*.test
+*.out
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
