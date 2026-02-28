@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: task-scheduler
+  labels:
+    app: worker
+    app.kubernetes.io/part-of: task-scheduler
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+        app.kubernetes.io/part-of: task-scheduler
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: ghcr.io/sauravritesh63/task-scheduler-worker:latest
+          imagePullPolicy: Always
+          env:
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: task-scheduler-config
+                  key: LOG_LEVEL
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: task-scheduler-secrets
+                  key: DATABASE_URL
+          # No HTTP endpoint — Kubernetes will restart the pod automatically
+          # if the process exits. Add a health-file probe or gRPC health check
+          # when the worker exposes one.
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"

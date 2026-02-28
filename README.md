@@ -875,6 +875,138 @@ scrape_configs:
 
 ---
 
+## Phase 8 — Containerization, CI/CD & Kubernetes
+
+### Local Development with Docker Compose
+
+```bash
+# Build and start all services (Postgres, Redis, API, Scheduler, Worker)
+docker compose up --build
+
+# API is available at http://localhost:8080
+curl http://localhost:8080/healthz
+# {"service":"task-scheduler-api","status":"ok"}
+
+# Tear down
+docker compose down -v
+```
+
+**Services started by `docker compose up`:**
+
+| Service   | Port | Description |
+|-----------|------|-------------|
+| postgres  | 5432 | PostgreSQL 16 (schema auto-applied via init scripts) |
+| redis     | 6379 | Redis 7 (for future queue integration) |
+| api       | 8080 | REST API + Prometheus metrics |
+| scheduler | —    | Scheduler service |
+| worker    | —    | Task worker (WORKER_ID=worker-1) |
+
+### Dockerfiles
+
+Each service has its own multi-stage Dockerfile under `docker/<service>/Dockerfile`:
+
+| Dockerfile | Build target | Base image |
+|------------|-------------|------------|
+| `docker/api/Dockerfile` | `cmd/api` | `gcr.io/distroless/static-debian12:nonroot` |
+| `docker/scheduler/Dockerfile` | `cmd/scheduler` | `gcr.io/distroless/static-debian12:nonroot` |
+| `docker/worker/Dockerfile` | `cmd/worker` | `gcr.io/distroless/static-debian12:nonroot` |
+
+Build images manually:
+```bash
+docker build -f docker/api/Dockerfile -t task-scheduler-api:dev .
+docker build -f docker/scheduler/Dockerfile -t task-scheduler-scheduler:dev .
+docker build -f docker/worker/Dockerfile -t task-scheduler-worker:dev .
+```
+
+**Environment variables:**
+
+| Variable | Service | Default | Description |
+|----------|---------|---------|-------------|
+| `PORT` | api | `8080` | HTTP listen port |
+| `DATABASE_URL` | api | `""` | PostgreSQL DSN (in-memory fallback if unset) |
+| `GIN_MODE` | api | `release` | Gin mode (`debug`/`release`) |
+| `WORKER_ID` | worker | `worker-1` | Unique worker identifier |
+| `LOG_LEVEL` | all | `info` | Log verbosity |
+
+### CI/CD Pipelines (GitHub Actions)
+
+#### `.github/workflows/ci.yaml` — Continuous Integration
+
+Triggered on every push and pull request to `main`/`master`:
+
+1. **Lint** — `golangci-lint` enforces code quality
+2. **Test** — `go test -race ./...` with coverage upload to Codecov
+3. **Build** — compiles all three binaries and validates Docker images
+
+#### `.github/workflows/release.yaml` — Release
+
+Triggered on `v*.*.*` tag push:
+
+1. Runs full test suite
+2. Cross-compiles binaries for `linux/amd64` and `linux/arm64`
+3. Builds and pushes multi-arch Docker images to GHCR
+4. Creates a GitHub Release with auto-generated release notes and binary attachments
+
+**To cut a release:**
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Images are published to:
+- `ghcr.io/<owner>/task-scheduler-api:<tag>`
+- `ghcr.io/<owner>/task-scheduler-scheduler:<tag>`
+- `ghcr.io/<owner>/task-scheduler-worker:<tag>`
+
+### Kubernetes — Production Deployment
+
+Apply manifests in order:
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml   # update DATABASE_URL secret first!
+kubectl apply -f k8s/api-deployment.yaml
+kubectl apply -f k8s/scheduler-deployment.yaml
+kubectl apply -f k8s/worker-deployment.yaml
+```
+
+**Manifest summary:**
+
+| File | Resource | Replicas | Notes |
+|------|----------|----------|-------|
+| `k8s/namespace.yaml` | Namespace | — | `task-scheduler` namespace |
+| `k8s/configmap.yaml` | ConfigMap + Secret | — | Non-secret config + DATABASE_URL |
+| `k8s/api-deployment.yaml` | Deployment + Service | 2 | Liveness & readiness probes on `/healthz` |
+| `k8s/scheduler-deployment.yaml` | Deployment | 1 | Single leader; scale with leader-election if needed |
+| `k8s/worker-deployment.yaml` | Deployment | 3 | Pod name injected as `WORKER_ID`; scale freely |
+
+**Scaling workers:**
+```bash
+kubectl -n task-scheduler scale deployment worker --replicas=10
+```
+
+**Health and readiness probes (API):**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+> **Security note:** Replace the placeholder `DATABASE_URL` in `k8s/configmap.yaml` with a
+> reference to an external secrets manager (e.g. AWS Secrets Manager, HashiCorp Vault, or
+> the Kubernetes External Secrets Operator) before deploying to production.
+
+---
+
 
 
 - [x] **Phase 1** — Domain models (`internal/domain`) + Scheduler interfaces (`domain/`)
@@ -915,3 +1047,11 @@ scrape_configs:
   - `GET /healthz` — Health check endpoint returning `{"status":"ok","service":"task-scheduler-api"}`
   - 1 unit test in `handler/handler_test.go` — `TestHealthz` — all passing
   - README updated with observability endpoints, metrics reference, and setup instructions
+- [x] **Phase 8** — Containerization, CI/CD, and Kubernetes (`docker/`, `docker-compose.yaml`, `.github/workflows/`, `k8s/`)
+  - Multi-stage Dockerfiles for each service (`docker/api/Dockerfile`, `docker/scheduler/Dockerfile`, `docker/worker/Dockerfile`)
+  - `docker-compose.yaml` for full local orchestration (Postgres, Redis, API, Scheduler, Worker) with health checks
+  - GitHub Actions CI pipeline (`.github/workflows/ci.yaml`): lint → test → build → Docker image validation
+  - GitHub Actions Release pipeline (`.github/workflows/release.yaml`): multi-arch binaries + GHCR images pushed on tag
+  - Kubernetes manifests (`k8s/`) for production: Namespace, ConfigMap/Secret, API Deployment (2 replicas, liveness/readiness probes), Scheduler Deployment (1 replica), Worker Deployment (3 replicas, pod name as WORKER_ID)
+  - Service entry points added: `cmd/api/main.go`, `cmd/scheduler/main.go`, `cmd/worker/main.go`
+  - README updated with deployment, scaling, and CI/CD instructions (see sections below)

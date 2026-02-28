@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  namespace: task-scheduler
+  labels:
+    app: scheduler
+    app.kubernetes.io/part-of: task-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scheduler
+  template:
+    metadata:
+      labels:
+        app: scheduler
+        app.kubernetes.io/part-of: task-scheduler
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: scheduler
+          image: ghcr.io/sauravritesh63/task-scheduler-scheduler:latest
+          imagePullPolicy: Always
+          env:
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: task-scheduler-config
+                  key: LOG_LEVEL
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: task-scheduler-secrets
+                  key: DATABASE_URL
+          # No HTTP endpoint — Kubernetes will restart the pod automatically
+          # if the process exits. Add a health-file probe or gRPC health check
+          # when the scheduler exposes one.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
