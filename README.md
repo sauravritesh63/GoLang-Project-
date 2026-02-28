@@ -1239,3 +1239,62 @@ Use this checklist to verify readiness before deploying to production.
 - **No DAG dependency enforcement**: `TaskDependency` rows are persisted in the database but the worker does not check upstream task completion before executing downstream tasks.
 - **API is unauthenticated**: Add JWT/API-key middleware before exposing the API to the public internet.
 - **No end-to-end tests**: Unit tests cover all layers in isolation; an integration smoke test (`docker compose up` → create workflow → verify `success` status) would close the last gap.
+
+## Frontend Dashboard
+
+A Next.js 14 dashboard providing real-time monitoring of the distributed task scheduler.
+
+### Stack
+
+- **Next.js 14** (App Router) + **React 18** + **TypeScript**
+- **Tailwind CSS** for styling
+- **TanStack Query v5** for data fetching & caching
+- **Framer Motion** for animated transitions
+- **Recharts** for charts
+- **Lucide React** for icons
+
+### Pages
+
+| Route | Description |
+|---|---|
+| `/` | Dashboard overview — summary cards + charts |
+| `/workflows` | Workflow list with trigger & create actions |
+| `/workflow-runs` | Run history with status filter tabs |
+| `/task-runs` | Task run list with inline log viewer modal |
+| `/workers` | Worker node status cards |
+
+### Setup
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Configure environment (optional)
+cp .env.local.example .env.local
+# Edit NEXT_PUBLIC_API_URL if your backend runs on a different address
+
+# Run development server
+npm run dev
+```
+
+The dashboard will be available at `http://localhost:3000`.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8080` | Backend API base URL |
+
+### Production Build
+
+```bash
+cd frontend
+npm run build
+npm start
+```
+
+### Real-time Updates
+
+The dashboard connects to `ws://<API_URL>/ws/updates` via WebSocket and automatically refreshes query caches when events arrive from the backend, with automatic reconnection on disconnect.
