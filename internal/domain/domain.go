@@ -37,14 +37,14 @@ type Workflow struct {
 
 // Task is a single unit of work that belongs to a Workflow.
 type Task struct {
-	ID                  uuid.UUID `json:"id"`
-	WorkflowID          uuid.UUID `json:"workflow_id"`
-	Name                string    `json:"name"`
-	Command             string    `json:"command"`
-	RetryCount          int       `json:"retry_count"`
-	RetryDelaySeconds   int       `json:"retry_delay_seconds"`
-	TimeoutSeconds      int       `json:"timeout_seconds"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                uuid.UUID `json:"id"`
+	WorkflowID        uuid.UUID `json:"workflow_id"`
+	Name              string    `json:"name"`
+	Command           string    `json:"command"`
+	RetryCount        int       `json:"retry_count"`
+	RetryDelaySeconds int       `json:"retry_delay_seconds"`
+	TimeoutSeconds    int       `json:"timeout_seconds"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // TaskDependency records that a task must wait for another task to complete first.
