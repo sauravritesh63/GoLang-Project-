@@ -50,7 +50,15 @@ Clean-architecture package layout:
    ├── service/service.go       (business-logic layer — context-aware)
    ├── handler/handler.go       (HTTP handlers)
    └── websocket/hub.go         (real-time event broadcasting)
-   scheduler/ worker/           ← Phase 5+
+        │
+        ▼
+   scheduler/                   ← Phase 5 ✅ (Scheduler + in-memory Queue)
+   ├── queue.go                 (MemQueue — thread-safe, unbounded FIFO)
+   └── scheduler.go             (Scheduler — Submit, Cancel, Status)
+        │
+        ▼
+   worker/                      ← Phase 6 ✅ (Worker service — execute, heartbeat, retry)
+   └── worker.go                (Worker — dequeue, execute, retry, heartbeat loop)
 ```
 
 ---
@@ -638,7 +646,89 @@ func main() {
 
 ---
 
-## Project Roadmap
+## Scheduler (`scheduler/`)
+
+Phase 5 adds the core scheduling primitives used by the Worker service.
+
+### MemQueue
+
+`scheduler.MemQueue` is a thread-safe, unbounded, FIFO in-memory queue that satisfies the `domain.Queue` interface.
+
+```go
+q := scheduler.NewMemQueue()
+
+// Enqueue a task.
+_ = q.Enqueue(ctx, task)
+
+// Dequeue blocks until a task is available or ctx is cancelled.
+t, err := q.Dequeue(ctx)
+
+// Len returns the current queue depth.
+n, _ := q.Len(ctx)
+```
+
+### Scheduler
+
+`scheduler.Scheduler` satisfies the `domain.Scheduler` interface and orchestrates task submission, cancellation, and status queries.
+
+```go
+sched := scheduler.New(taskRepo, workerRepo, queue)
+
+// Submit validates the task, marks it Queued, persists it, and enqueues it.
+_ = sched.Submit(ctx, task)
+
+// Cancel marks a non-terminal task as Failed (no-op for terminal tasks).
+_ = sched.Cancel(ctx, task.ID)
+
+// Status returns the current TaskStatus.
+status, _ := sched.Status(ctx, task.ID)
+```
+
+---
+
+## Worker Service (`worker/`)
+
+Phase 6 adds the Worker service that pulls tasks from the queue and executes them.
+
+### Worker
+
+`worker.Worker` registers itself with the `WorkerRepository`, processes tasks one at a time, retries failed tasks up to `task.MaxRetries` times, and sends periodic heartbeats.
+
+```go
+// handler is your business logic for executing a task payload.
+handler := func(ctx context.Context, task *domain.Task) error {
+    // ... process task.Payload ...
+    return nil
+}
+
+w := worker.New(
+    "worker-1",        // unique worker ID / address
+    queue,             // domain.Queue (e.g. scheduler.NewMemQueue())
+    taskRepo,          // domain.TaskRepository
+    workerRepo,        // domain.WorkerRepository
+    handler,
+    worker.WithHeartbeatInterval(15*time.Second), // optional
+)
+
+// Run blocks until ctx is cancelled.
+if err := w.Run(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+#### Task lifecycle managed by the worker
+
+| Transition | Condition |
+|------------|-----------|
+| `queued` → `running` | Task dequeued |
+| `running` → `succeeded` | Handler returned nil |
+| `running` → `retrying` | Handler returned error **and** `task.CanRetry()` is true |
+| `retrying` → `running` | Task re-enqueued and dequeued again |
+| `running` → `failed` | Handler returned error **and** no retries remaining |
+
+---
+
+
 
 - [x] **Phase 1** — Domain models (`internal/domain`) + Scheduler interfaces (`domain/`)
   - Core structs: `Workflow`, `Task`, `TaskDependency`, `WorkflowRun`, `TaskRun`, `Worker`
@@ -661,19 +751,13 @@ func main() {
   - `internal/api/websocket/` — Gorilla WebSocket hub for real-time event broadcasting
   - 10 unit tests in `handler/handler_test.go` — all passing
   - README updated with endpoint reference, WebSocket usage, and architecture notes
-- [ ] **Phase 5** — Scheduler service (`scheduler/`) — **NOT STARTED** ⚠️
-  - **Status:** No `scheduler/` package exists; Phase 5 has not been implemented.
-  - **Verified against latest PR:** PR #7 (merged 2026-02-28) covers Phase 4 only. No scheduler code was introduced.
-  - **TODOs before Phase 6 (Worker Service) can begin:**
-    - [ ] Create `scheduler/` package with a `Scheduler` struct implementing the `domain.Scheduler` interface
-    - [ ] Implement cron-based trigger loop (e.g. using `robfig/cron` or `time.Ticker`) to poll for due workflows
-    - [ ] Enqueue ready `Task` records onto the `domain.Queue` when their `ScheduledAt` time is reached
-    - [ ] Persist `WorkflowRun` and initial `TaskRun` records via `repository.WorkflowRunRepository` / `repository.TaskRunRepository`
-    - [ ] Evaluate workflow DAG dependencies (respect `TaskDependency` ordering before enqueuing downstream tasks)
-    - [ ] Integrate scheduler with WebSocket hub (`api/websocket`) to broadcast `workflow_status` events on trigger
-    - [ ] Write unit tests for scheduler logic using mock repositories and an in-memory queue
-    - [ ] Update `internal/api/service/` to expose a `TriggerWorkflow` path that delegates to the scheduler
-    - [ ] Update architecture diagram in README to show `scheduler/` package in the data flow
-- [ ] **Phase 6** — Worker service (task execution, heartbeat, retry logic) — blocked by Phase 5
+- [x] **Phase 5** — Scheduler service (`scheduler/`)
+  - `scheduler/queue.go` — thread-safe, unbounded in-memory `MemQueue` implementing `domain.Queue` (FIFO, blocking Dequeue with context cancellation)
+  - `scheduler/scheduler.go` — `Scheduler` struct implementing `domain.Scheduler` (Submit, Cancel, Status)
+  - 14 unit tests in `scheduler/scheduler_test.go` — all passing; compile-time interface checks included
+- [x] **Phase 6** — Worker service (`worker/`) — task execution, heartbeat, retry logic
+  - `worker/worker.go` — `Worker` struct: registers with `WorkerRepository`, dequeues tasks, executes via pluggable `Handler`, transitions task status, retries on failure, sends periodic heartbeats
+  - Configurable heartbeat interval via `WithHeartbeatInterval` functional option
+  - 6 unit tests in `worker/worker_test.go` — all passing (register, success, retry, no-retry, clean shutdown, heartbeat)
 - [ ] **Phase 7** — Persistence layer (PostgreSQL — wire up repositories to real DB)
 - [ ] **Phase 8** — Observability (metrics, structured logging, tracing)
