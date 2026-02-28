@@ -832,10 +832,14 @@ col.TaskRetries.WithLabelValues(workerID).Inc()
 
 ### HTTP Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/metrics` | GET | Prometheus scrape endpoint — exposes all registered metrics in text format |
-| `/healthz` | GET | Health check — returns `{"status":"ok","service":"task-scheduler-api"}` |
+| Service   | Endpoint | Method | Description |
+|-----------|----------|--------|-------------|
+| api       | `/metrics` | GET | Prometheus scrape endpoint — exposes all registered metrics in text format |
+| api       | `/healthz` | GET | Health check — returns `{"status":"ok","service":"task-scheduler-api"}` |
+| scheduler | `/metrics` | GET | Prometheus scrape endpoint (port `METRICS_PORT`, default `9090`) |
+| scheduler | `/healthz` | GET | Health check — returns `{"status":"ok","service":"task-scheduler-scheduler"}` |
+| worker    | `/metrics` | GET | Prometheus scrape endpoint (port `METRICS_PORT`, default `9091`) |
+| worker    | `/healthz` | GET | Health check — returns `{"status":"ok","service":"task-scheduler-worker"}` |
 
 **Example — check health:**
 ```bash
@@ -854,7 +858,7 @@ curl http://localhost:8080/metrics
 
 ### Prometheus Setup (docker-compose snippet)
 
-Add the following to your `docker-compose.yml` to scrape the API service:
+Add the following to your `docker-compose.yml` to scrape all three services:
 
 ```yaml
 prometheus:
@@ -871,7 +875,15 @@ scrape_configs:
   - job_name: task-scheduler-api
     static_configs:
       - targets: ["api:8080"]
+  - job_name: task-scheduler-scheduler
+    static_configs:
+      - targets: ["scheduler:9090"]
+  - job_name: task-scheduler-worker
+    static_configs:
+      - targets: ["worker:9091"]
 ```
+
+> **Kubernetes:** The `scheduler` and `worker` Deployments already include `prometheus.io/scrape: "true"` pod annotations, so a standard Prometheus operator or annotation-based scrape config will pick them up automatically.
 
 ---
 
@@ -926,6 +938,8 @@ docker build -f docker/worker/Dockerfile -t task-scheduler-worker:dev .
 | `DATABASE_URL` | api | `""` | PostgreSQL DSN (in-memory fallback if unset) |
 | `GIN_MODE` | api | `release` | Gin mode (`debug`/`release`) |
 | `WORKER_ID` | worker | `worker-1` | Unique worker identifier |
+| `METRICS_PORT` | scheduler | `9090` | Port for `/metrics` and `/healthz` endpoints |
+| `METRICS_PORT` | worker | `9091` | Port for `/metrics` and `/healthz` endpoints |
 | `LOG_LEVEL` | all | `info` | Log verbosity |
 
 ### CI/CD Pipelines (GitHub Actions)
@@ -1049,11 +1063,12 @@ readinessProbe:
   - README updated with observability endpoints, metrics reference, and setup instructions
 - [x] **Phase 8** — Containerization, CI/CD, and Kubernetes (`docker/`, `docker-compose.yaml`, `.github/workflows/`, `k8s/`)
   - Multi-stage Dockerfiles for each service (`docker/api/Dockerfile`, `docker/scheduler/Dockerfile`, `docker/worker/Dockerfile`)
-  - `docker-compose.yaml` for full local orchestration (Postgres, Redis, API, Scheduler, Worker) with health checks
+  - `docker-compose.yaml` for full local orchestration (Postgres, Redis, API, Scheduler, Worker) with health checks on all services
   - GitHub Actions CI pipeline (`.github/workflows/ci.yaml`): lint → test → build → Docker image validation
   - GitHub Actions Release pipeline (`.github/workflows/release.yaml`): multi-arch binaries + GHCR images pushed on tag
-  - Kubernetes manifests (`k8s/`) for production: Namespace, ConfigMap/Secret, API Deployment (2 replicas, liveness/readiness probes), Scheduler Deployment (1 replica), Worker Deployment (3 replicas, pod name as WORKER_ID)
+  - Kubernetes manifests (`k8s/`) for production: Namespace, ConfigMap/Secret, API Deployment (2 replicas, liveness/readiness probes), Scheduler Deployment (1 replica, liveness/readiness on `:9090/healthz`), Worker Deployment (3 replicas, liveness/readiness on `:9091/healthz`, pod name as WORKER_ID)
   - Service entry points added: `cmd/api/main.go`, `cmd/scheduler/main.go`, `cmd/worker/main.go`
+  - All three services expose `/metrics` (Prometheus) and `/healthz` (health check) endpoints
   - README updated with deployment, scaling, and CI/CD instructions (see sections below)
 
 ---
@@ -1124,7 +1139,7 @@ Use this checklist before every production launch or major deployment.
 
 2. **Add scheduler leader-election** — The `k8s/scheduler-deployment.yaml` runs a single replica. Until leader-election is implemented (e.g. via a Kubernetes Lease object), scaling the scheduler to >1 replica will cause duplicate task submissions. Keep `replicas: 1` until this is addressed.
 
-3. **Instrument the scheduler and worker with Prometheus metrics** — `observability/metrics/metrics.go` defines the `Collector`, but the scheduler and worker services do not yet call `metrics.New()` and record observations. Wire metrics into `cmd/scheduler/main.go` and `cmd/worker/main.go`.
+3. ~~**Instrument the scheduler and worker with Prometheus metrics**~~ ✅ **Done** — `cmd/scheduler/main.go` and `cmd/worker/main.go` now call `metrics.New()` at startup and expose `/metrics` and `/healthz` endpoints on dedicated ports (`METRICS_PORT`, defaulting to `9090` and `9091` respectively). K8s manifests updated with liveness/readiness probes and `prometheus.io/scrape` annotations. `docker-compose.yaml` updated with health checks on the new ports.
 
 4. **Add integration / smoke tests** — The test suite covers domain logic and repository mocks well (80+ unit tests), but there are no end-to-end tests that spin up the full stack. Add at least one smoke test using `docker compose up` that verifies: workflow created → task queued → worker picks it up → status transitions to `success`.
 
@@ -1141,3 +1156,86 @@ Use this checklist before every production launch or major deployment.
 9. **WebSocket authentication** — The WebSocket hub at `/ws/tasks` is unauthenticated. Add a token-based handshake before upgrading connections.
 
 10. **Horizontal worker auto-scaling** — Configure a Kubernetes HPA on the Worker deployment that scales on a custom metric (e.g. queue depth exported via a Prometheus adapter), so the worker pool grows automatically under load.
+
+
+---
+
+## Final Review Summary
+
+This section captures the overall project readiness at the time of the final review pass.
+
+### Phase Completion
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Domain models (`internal/domain`) + Scheduler interfaces (`domain/`) | ✅ Complete |
+| 2 | SQL migrations (`db/migrations/`) | ✅ Complete |
+| 3 | Repository interfaces, GORM implementations, mock implementations | ✅ Complete |
+| 4 | REST API (Gin), WebSocket hub, service layer | ✅ Complete |
+| 5 | Scheduler service (`scheduler/`) — queue, submit, cancel, status | ✅ Complete |
+| 6 | Worker service (`worker/`) — dequeue, execute, retry, heartbeat | ✅ Complete |
+| 7 | Observability — structured logging, Prometheus metrics, `/metrics` + `/healthz` on all three services | ✅ Complete |
+| 8 | Containerization, CI/CD, Kubernetes | ✅ Complete |
+
+### Test Coverage
+
+| Package | Tests | Status |
+|---------|-------|--------|
+| `internal/domain` | 16 unit tests | ✅ Pass |
+| `domain` | 18 unit tests | ✅ Pass |
+| `internal/repository/mock` | 30 unit tests | ✅ Pass |
+| `internal/repository/postgres` | Compile-time interface checks | ✅ Pass |
+| `internal/api/handler` | 10 unit tests (incl. `/healthz`) | ✅ Pass |
+| `internal/api/service` | Unit tests | ✅ Pass |
+| `internal/api/websocket` | Unit tests | ✅ Pass |
+| `scheduler` | 14 unit tests | ✅ Pass |
+| `worker` | 8 unit tests | ✅ Pass |
+
+Run the full test suite with the race detector:
+```bash
+go test -race ./...
+```
+
+### Metrics & Health Endpoints
+
+| Service | Port | `/healthz` | `/metrics` |
+|---------|------|-----------|-----------|
+| api | 8080 | ✅ | ✅ |
+| scheduler | 9090 (configurable via `METRICS_PORT`) | ✅ | ✅ |
+| worker | 9091 (configurable via `METRICS_PORT`) | ✅ | ✅ |
+
+---
+
+## Go-Live Checklist
+
+Use this checklist to verify readiness before deploying to production.
+
+### ✅ Must-pass before go-live
+
+- [ ] `go build ./...` passes with zero errors
+- [ ] `go test -race ./...` — all unit tests pass
+- [ ] `go vet ./...` — zero vet warnings
+- [ ] `GET /healthz` returns HTTP 200 on all three services
+- [ ] `GET /metrics` returns valid Prometheus text format on all three services
+- [ ] Docker images build successfully for all three services:
+  ```bash
+  docker build -f docker/api/Dockerfile -t task-scheduler-api:v1.0.0 .
+  docker build -f docker/scheduler/Dockerfile -t task-scheduler-scheduler:v1.0.0 .
+  docker build -f docker/worker/Dockerfile -t task-scheduler-worker:v1.0.0 .
+  ```
+- [ ] `docker compose up --build` starts successfully; `curl http://localhost:8080/healthz` returns `{"service":"task-scheduler-api","status":"ok"}`
+- [ ] Database migrations applied on target database: `migrate -path db/migrations -database "$DATABASE_URL" up`
+- [ ] `DATABASE_URL` Secret in `k8s/configmap.yaml` replaced with real credentials (or external secret reference)
+- [ ] K8s manifests applied in order: `namespace.yaml` → `configmap.yaml` → all three Deployments
+- [ ] All three Deployment rollouts complete: `kubectl -n task-scheduler rollout status deployment/api deployment/scheduler deployment/worker`
+- [ ] Liveness and readiness probes healthy: `kubectl -n task-scheduler get pods`
+- [ ] Prometheus successfully scraping all three targets (check `Status → Targets` in Prometheus UI)
+- [ ] CI pipeline (`.github/workflows/ci.yaml`) is green on the release commit
+
+### ⚠️ Known limitations (address post-launch)
+
+- **In-memory queue**: The scheduler uses an in-memory FIFO queue. Restarting the scheduler pod will drop any queued-but-not-yet-dequeued tasks. Integrate Redis Streams or a PostgreSQL-backed queue before enabling high-availability deployments.
+- **Scheduler: no cron triggering**: `cmd/scheduler/main.go` initialises the scheduler but does not yet parse `ScheduleCron` fields and trigger `WorkflowRun` creation on schedule. A cron library (e.g. `github.com/robfig/cron/v3`) and a trigger loop need to be added.
+- **No DAG dependency enforcement**: `TaskDependency` rows are persisted in the database but the worker does not check upstream task completion before executing downstream tasks.
+- **API is unauthenticated**: Add JWT/API-key middleware before exposing the API to the public internet.
+- **No end-to-end tests**: Unit tests cover all layers in isolation; an integration smoke test (`docker compose up` → create workflow → verify `success` status) would close the last gap.

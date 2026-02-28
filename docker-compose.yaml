@@ -61,11 +61,19 @@ services:
     restart: unless-stopped
     environment:
       LOG_LEVEL: info
+      METRICS_PORT: "9090"
+    ports:
+      - "9090:9090"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   worker:
     build:
@@ -75,9 +83,17 @@ services:
     environment:
       WORKER_ID: worker-1
       LOG_LEVEL: info
+      METRICS_PORT: "9091"
+    ports:
+      - "9091:9091"
     depends_on:
       scheduler:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9091/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
