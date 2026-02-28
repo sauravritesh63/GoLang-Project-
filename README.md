@@ -692,10 +692,11 @@ Phase 6 adds the Worker service that pulls tasks from the queue and executes the
 
 ### Worker
 
-`worker.Worker` registers itself with the `WorkerRepository`, processes tasks one at a time, retries failed tasks up to `task.MaxRetries` times, and sends periodic heartbeats.
+`worker.Worker` registers itself with the `WorkerRepository`, processes tasks one at a time, retries failed tasks up to `task.MaxRetries` times with exponential backoff, and sends periodic heartbeats.
 
 ```go
 // handler is your business logic for executing a task payload.
+// Use worker.MockShellHandler during development / testing.
 handler := func(ctx context.Context, task *domain.Task) error {
     // ... process task.Payload ...
     return nil
@@ -707,13 +708,29 @@ w := worker.New(
     taskRepo,          // domain.TaskRepository
     workerRepo,        // domain.WorkerRepository
     handler,
-    worker.WithHeartbeatInterval(15*time.Second), // optional
+    worker.WithHeartbeatInterval(15*time.Second), // optional; default 15 s
+    worker.WithBackoff(worker.DefaultBackoff),     // optional; default exponential
 )
 
 // Run blocks until ctx is cancelled.
 if err := w.Run(ctx); err != nil {
     log.Fatal(err)
 }
+```
+
+#### Configuration options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithHeartbeatInterval(d)` | 15 s | How often the worker refreshes its `LastHeartAt` timestamp in the `WorkerRepository`. |
+| `WithBackoff(fn)` | `DefaultBackoff` | Function that returns the delay before each retry attempt. `DefaultBackoff` gives 1 s, 2 s, 4 s … capped at 30 s. Pass `func(int) time.Duration { return 0 }` in tests for instant retries. |
+
+#### MockShellHandler
+
+`worker.MockShellHandler` is a built-in `Handler` that simulates shell-command execution using the task's `Payload` field. It always succeeds and is suitable for development and unit tests before a real executor is wired in.
+
+```go
+w := worker.New("worker-1", queue, taskRepo, workerRepo, worker.MockShellHandler)
 ```
 
 #### Task lifecycle managed by the worker
@@ -723,8 +740,25 @@ if err := w.Run(ctx); err != nil {
 | `queued` → `running` | Task dequeued |
 | `running` → `succeeded` | Handler returned nil |
 | `running` → `retrying` | Handler returned error **and** `task.CanRetry()` is true |
-| `retrying` → `running` | Task re-enqueued and dequeued again |
+| `retrying` → `running` | Backoff delay elapsed; task re-enqueued and dequeued again |
 | `running` → `failed` | Handler returned error **and** no retries remaining |
+
+#### Deployment
+
+Run one or more workers alongside the API server. Each worker is stateless — scale horizontally by starting additional processes with unique IDs:
+
+```bash
+# Terminal 1 — API server
+go run ./cmd/api
+
+# Terminal 2 — worker-1
+WORKER_ID=worker-1 go run ./cmd/worker
+
+# Terminal 3 — worker-2 (horizontal scale-out)
+WORKER_ID=worker-2 go run ./cmd/worker
+```
+
+Workers register themselves in the `WorkerRepository` on startup and send heartbeats at the configured interval. Remove a worker at any time by cancelling its context (e.g., `SIGTERM`); in-flight tasks will reach a terminal state before the goroutine exits.
 
 ---
 
@@ -756,8 +790,10 @@ if err := w.Run(ctx); err != nil {
   - `scheduler/scheduler.go` — `Scheduler` struct implementing `domain.Scheduler` (Submit, Cancel, Status)
   - 14 unit tests in `scheduler/scheduler_test.go` — all passing; compile-time interface checks included
 - [x] **Phase 6** — Worker service (`worker/`) — task execution, heartbeat, retry logic
-  - `worker/worker.go` — `Worker` struct: registers with `WorkerRepository`, dequeues tasks, executes via pluggable `Handler`, transitions task status, retries on failure, sends periodic heartbeats
-  - Configurable heartbeat interval via `WithHeartbeatInterval` functional option
-  - 6 unit tests in `worker/worker_test.go` — all passing (register, success, retry, no-retry, clean shutdown, heartbeat)
+  - `worker/worker.go` — `Worker` struct: registers with `WorkerRepository`, dequeues tasks, executes via pluggable `Handler`, transitions task status, retries on failure with exponential backoff, sends periodic heartbeats
+  - `worker.MockShellHandler` — built-in handler that simulates shell-command execution for development and testing
+  - `worker.DefaultBackoff` — exponential backoff (1 s, 2 s, 4 s … capped at 30 s); overridable via `WithBackoff`
+  - `worker.WithBackoff` functional option for injecting a custom or zero-delay backoff (useful in tests)
+  - 8 unit tests in `worker/worker_test.go` — all passing (register, success, retry, no-retry, clean shutdown, heartbeat, mock-handler, backoff timing)
 - [ ] **Phase 7** — Persistence layer (PostgreSQL — wire up repositories to real DB)
 - [ ] **Phase 8** — Observability (metrics, structured logging, tracing)

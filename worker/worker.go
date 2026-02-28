@@ -15,6 +15,31 @@ import (
 // It should return nil on success or a non-nil error on failure.
 type Handler func(ctx context.Context, task *domain.Task) error
 
+// BackoffFunc computes the wait duration before the next retry attempt.
+// attempt is 0-indexed: 0 = first retry, 1 = second retry, and so on.
+type BackoffFunc func(attempt int) time.Duration
+
+// DefaultBackoff returns an exponentially increasing delay capped at 30 seconds.
+// attempt 0 → 1 s, 1 → 2 s, 2 → 4 s, 3 → 8 s, 4 → 16 s, ≥5 → 30 s.
+func DefaultBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(attempt)) * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
+}
+
+// MockShellHandler is a Handler that simulates shell-command execution.
+// The task Payload (if non-empty) is treated as the command string and logged
+// to stdout; the function always succeeds. Use it during development and unit
+// tests in place of a real shell executor.
+func MockShellHandler(_ context.Context, task *domain.Task) error {
+	if len(task.Payload) > 0 {
+		fmt.Printf("mock-exec: %s\n", task.Payload)
+	}
+	return nil
+}
+
 // Worker dequeues tasks from a Queue, executes them using a Handler, and
 // manages task lifecycle: status transitions, retries, and heartbeats.
 type Worker struct {
@@ -25,6 +50,7 @@ type Worker struct {
 	handler Handler
 
 	heartbeatInterval time.Duration
+	backoff           BackoffFunc
 }
 
 // Option is a functional option for configuring a Worker.
@@ -34,6 +60,12 @@ type Option func(*Worker)
 // The default is 15 seconds.
 func WithHeartbeatInterval(d time.Duration) Option {
 	return func(w *Worker) { w.heartbeatInterval = d }
+}
+
+// WithBackoff sets the backoff function used to compute the delay before
+// each retry. The default is DefaultBackoff (exponential, capped at 30 s).
+func WithBackoff(fn BackoffFunc) Option {
+	return func(w *Worker) { w.backoff = fn }
 }
 
 // New creates a Worker with the given ID, dependencies, and task handler.
@@ -52,6 +84,7 @@ func New(
 		workers:           workers,
 		handler:           handler,
 		heartbeatInterval: 15 * time.Second,
+		backoff:           DefaultBackoff,
 	}
 	for _, o := range opts {
 		o(w)
@@ -114,6 +147,15 @@ func (w *Worker) execute(ctx context.Context, task *domain.Task) {
 			task.RetryCount++
 			task.Status = domain.TaskStatusRetrying
 			_ = w.tasks.Save(ctx, task)
+			// Apply exponential backoff before re-enqueueing.
+			delay := w.backoff(task.RetryCount - 1)
+			if delay > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+			}
 			// Re-enqueue for retry.
 			_ = w.queue.Enqueue(ctx, task)
 			return
